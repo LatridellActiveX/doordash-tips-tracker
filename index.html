@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#1a1a1a">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <title>DoorDash Tips</title>
+  <title>DoorDash Tips + Gas</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛵</text></svg>">
   <style>
@@ -20,35 +20,41 @@
     input { background: #2a2a2a; color: #fff; margin-bottom: 0.5rem; }
     button { background: #ff6b35; color: #fff; font-weight: bold; cursor: pointer; }
     button:active { opacity: 0.8; }
-    .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; text-align: center; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; text-align: center; }
     .stat { background: #2a2a2a; padding: 0.75rem; border-radius: 8px; }
     .stat b { display: block; font-size: 1.2rem; color: #ff6b35; }
-    .entry { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #333; }
+    .entry { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #333; gap: 0.5rem; }
     .entry:last-child { border: none; }
-    .delete { background: #c0392b; width: auto; padding: 0.4rem 0.8rem; font-size: 0.8rem; }
+    .delete { background: #c0392b; width: auto; padding: 0.4rem 0.8rem; font-size: 0.8rem; flex-shrink: 0; }
     .empty { text-align: center; color: #666; padding: 2rem; }
+    .entry-info { flex: 1; }
+    .entry-vals { text-align: right; font-weight: bold; }
   </style>
 </head>
 <body>
   <header>
-    <h1>🛵 DoorDash Tips</h1>
-    <p>Track your daily tips</p>
+    <h1>🛵 DoorDash Tracker</h1>
+    <p>Tips + Gas Range</p>
   </header>
 
   <div class="card">
     <label>Date</label>
     <input type="date" id="date">
     <label>Tips ($)</label>
-    <input type="number" id="amount" step="0.01" min="0" placeholder="0.00">
-    <button onclick="saveTip()">Save Tip</button>
+    <input type="number" id="tips" step="0.01" min="0" placeholder="0.00">
+    <label>Gas Range (miles)</label>
+    <input type="number" id="miles" step="0.1" min="0" placeholder="0">
+    <button onclick="saveEntry()">Save</button>
   </div>
 
   <div class="card">
     <div class="stats">
-      <div class="stat"><b id="total">$0</b>Total</div>
-      <div class="stat"><b id="avg">$0</b>Avg/Day</div>
-      <div class="stat"><b id="days">0</b>Days</div>
+      <div class="stat"><b id="totalTips">$0</b>Total Tips</div>
+      <div class="stat"><b id="avgTips">$0</b>Avg Tips</div>
+      <div class="stat"><b id="totalMiles">0</b>Total Miles</div>
+      <div class="stat"><b id="avgMiles">0</b>Avg Miles</div>
     </div>
+    <div style="text-align:center;margin-top:0.5rem;color:#aaa"><b id="days">0</b> days tracked</div>
   </div>
 
   <div class="card">
@@ -58,7 +64,14 @@
 
   <script>
     const KEY = 'doordash-tips';
-    let tips = JSON.parse(localStorage.getItem(KEY) || '{}');
+    let data = JSON.parse(localStorage.getItem(KEY) || '{}');
+
+    // Migrate old number-only data to objects
+    for (const [date, val] of Object.entries(data)) {
+      if (typeof val === 'number') {
+        data[date] = { tips: val, miles: 0 };
+      }
+    }
 
     function today() {
       return new Date().toISOString().split('T')[0];
@@ -66,44 +79,55 @@
 
     document.getElementById('date').value = today();
 
-    function saveTip() {
+    function saveEntry() {
       const date = document.getElementById('date').value;
-      const amount = parseFloat(document.getElementById('amount').value);
-      if (!date || isNaN(amount) || amount < 0) return alert('Enter valid date and amount');
-      tips[date] = amount;
-      localStorage.setItem(KEY, JSON.stringify(tips));
-      document.getElementById('amount').value = '';
+      const tips = parseFloat(document.getElementById('tips').value) || 0;
+      const miles = parseFloat(document.getElementById('miles').value) || 0;
+      if (!date) return alert('Enter a date');
+      if (tips < 0 || miles < 0) return alert('Values must be positive');
+
+      data[date] = { tips, miles };
+      localStorage.setItem(KEY, JSON.stringify(data));
+      document.getElementById('tips').value = '';
+      document.getElementById('miles').value = '';
       render();
     }
 
-    function deleteTip(date) {
-      if (confirm('Delete tip for ' + date + '?')) {
-        delete tips[date];
-        localStorage.setItem(KEY, JSON.stringify(tips));
+    function deleteEntry(date) {
+      if (confirm('Delete entry for ' + date + '?')) {
+        delete data[date];
+        localStorage.setItem(KEY, JSON.stringify(data));
         render();
       }
     }
 
     function render() {
-      const entries = Object.entries(tips).sort((a,b) => b[0].localeCompare(a[0]));
-      const total = entries.reduce((s, [,v]) => s + v, 0);
+      const entries = Object.entries(data).sort((a,b) => b[0].localeCompare(a[0]));
       const days = entries.length;
-      const avg = days ? total / days : 0;
+      const totalTips = entries.reduce((s, [,v]) => s + (v.tips || 0), 0);
+      const totalMiles = entries.reduce((s, [,v]) => s + (v.miles || 0), 0);
+      const avgTips = days ? totalTips / days : 0;
+      const avgMiles = days ? totalMiles / days : 0;
 
-      document.getElementById('total').textContent = '$' + total.toFixed(2);
-      document.getElementById('avg').textContent = '$' + avg.toFixed(2);
+      document.getElementById('totalTips').textContent = '$' + totalTips.toFixed(2);
+      document.getElementById('avgTips').textContent = '$' + avgTips.toFixed(2);
+      document.getElementById('totalMiles').textContent = totalMiles.toFixed(1);
+      document.getElementById('avgMiles').textContent = avgMiles.toFixed(1);
       document.getElementById('days').textContent = days;
 
       const list = document.getElementById('list');
       if (!entries.length) {
-        list.innerHTML = '<div class="empty">No tips logged yet</div>';
+        list.innerHTML = '<div class="empty">No entries yet</div>';
         return;
       }
-      list.innerHTML = entries.map(([date, amount]) => `
+      list.innerHTML = entries.map(([date, v]) => `
         <div class="entry">
-          <span>${date}</span>
-          <span style="font-weight:bold;color:#ff6b35">$${amount.toFixed(2)}</span>
-          <button class="delete" onclick="deleteTip('${date}')">×</button>
+          <div class="entry-info">${date}</div>
+          <div class="entry-vals">
+            $${(v.tips || 0).toFixed(2)}<br>
+            <span style="color:#aaa;font-size:0.85rem">${(v.miles || 0).toFixed(1)} mi</span>
+          </div>
+          <button class="delete" onclick="deleteEntry('${date}')">×</button>
         </div>
       `).join('');
     }
