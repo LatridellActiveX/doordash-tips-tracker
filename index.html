@@ -29,6 +29,8 @@
     .empty { text-align: center; color: #666; padding: 2rem; }
     .entry-info { flex: 1; }
     .entry-vals { text-align: right; font-weight: bold; }
+    .hint { color: #aaa; font-size: 0.85rem; margin-bottom: 0.5rem; }
+    .warn { color: #f1c40f; font-size: 0.85rem; margin-bottom: 0.5rem; min-height: 1em; }
   </style>
 </head>
 <body>
@@ -37,102 +39,268 @@
     <p>Tips + Gas Range</p>
   </header>
 
+  <!-- Quick per-order tip entry: type amount, tap Save (or Enter), field clears -->
   <div class="card">
-    <label>Date</label>
-    <input type="date" id="date">
-    <label>Tips ($)</label>
-    <input type="number" id="tips" step="0.01" min="0" placeholder="0.00">
-    <label>Gas Range (miles)</label>
-    <input type="number" id="miles" step="0.1" min="0" placeholder="0">
-    <button onclick="saveEntry()">Save</button>
+    <label>Tip for this order ($)</label>
+    <input type="number" id="amount" inputmode="decimal" step="0.01" min="0" placeholder="0.00"
+           onkeydown="if(event.key==='Enter')saveOrder()">
+    <input type="text" id="note" placeholder="Note (optional)" onkeydown="if(event.key==='Enter')saveOrder()">
+    <button id="saveBtn" onclick="saveOrder()">Save Order</button>
+    <div class="hint" id="savedMsg" style="margin:0.5rem 0 0;text-align:center"></div>
   </div>
 
   <div class="card">
     <div class="stats">
-      <div class="stat"><b id="totalTips">$0</b>Total Tips</div>
-      <div class="stat"><b id="avgTips">$0</b>Avg Tips</div>
-      <div class="stat"><b id="totalMiles">0</b>Total Miles</div>
-      <div class="stat"><b id="avgMiles">0</b>Avg Miles</div>
+      <div class="stat"><b id="todayTotal">$0.00</b>Today's Tips</div>
+      <div class="stat"><b id="todayCount">0</b>Orders Today</div>
+      <div class="stat"><b id="totalTips">$0.00</b>All-Time Tips</div>
+      <div class="stat"><b id="avgTips">$0.00</b>Avg Per Day</div>
     </div>
     <div style="text-align:center;margin-top:0.5rem;color:#aaa"><b id="days">0</b> days tracked</div>
   </div>
 
   <div class="card">
-    <h3 style="margin-bottom:0.5rem">History</h3>
+    <h3 style="margin-bottom:0.5rem">Today's Orders</h3>
+    <div id="todayList"></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:0.5rem">History by Day</h3>
     <div id="list"></div>
   </div>
 
+  <!-- Gas range card: start range -> ending range at the pump -> new range after filling -->
+  <div class="card">
+    <h3 style="margin-bottom:0.5rem">⛽ Gas Range</h3>
+    <div class="stats" style="margin-bottom:0.75rem">
+      <div class="stat"><b id="startRange">—</b>Starting Range (mi)</div>
+      <div class="stat"><b id="gasTotal">0</b>Total Miles Used</div>
+    </div>
+    <!-- Step 1: shown only until a starting range exists -->
+    <div id="stepStart">
+      <label>Starting range (miles to empty)</label>
+      <input type="number" id="startInput" step="1" min="0" placeholder="e.g. 320">
+      <button onclick="setStart()">Set Starting Range</button>
+    </div>
+    <!-- Step 2: at the gas station, before filling -->
+    <div id="stepEnd">
+      <label>Ending range (shown when you arrived, before filling)</label>
+      <input type="number" id="endInput" step="1" min="0" placeholder="e.g. 40" oninput="checkEnd()">
+      <div class="warn" id="endWarn"></div>
+      <button onclick="logFill()">Log Fill-Up</button>
+    </div>
+    <!-- Step 3: after filling, the new range becomes the next starting range -->
+    <div id="stepRefill">
+      <p class="hint" id="refillHint"></p>
+      <label>New range after filling up</label>
+      <input type="number" id="refillInput" step="1" min="0" placeholder="e.g. 350">
+      <button onclick="setRefill()">Save New Range</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:0.5rem">Fill-Ups</h3>
+    <div id="fillList"></div>
+  </div>
+
   <script>
+    /* ---------- Per-order tips ----------
+     * Orders live under ORDERS_KEY as an array:
+     *   [{ id, ts (ms), date ('YYYY-MM-DD', local), amount, note, old?, miles? }]
+     * The old app stored ONE daily total per date under KEY ({date: {tips, miles}} or {date: number}).
+     * On first load those totals are migrated into one order each, noted "day total (old)".
+     * The old key is left in place (not deleted) as a backup. */
     const KEY = 'doordash-tips';
-    let data = JSON.parse(localStorage.getItem(KEY) || '{}');
-
-    // Migrate old number-only data to objects
-    for (const [date, val] of Object.entries(data)) {
-      if (typeof val === 'number') {
-        data[date] = { tips: val, miles: 0 };
+    const ORDERS_KEY = 'doordash-orders';
+    let orders = JSON.parse(localStorage.getItem(ORDERS_KEY) || 'null');
+    if (!Array.isArray(orders)) {
+      orders = [];
+      const legacy = JSON.parse(localStorage.getItem(KEY) || '{}');
+      for (const [date, val] of Object.entries(legacy)) {
+        const v = typeof val === 'number' ? { tips: val, miles: 0 } : (val || {});
+        if (!(v.tips > 0) && !(v.miles > 0)) continue;
+        // Noon local time on that day so it sorts sensibly and stays on the right date
+        orders.push({ id: 'old-' + date, ts: new Date(date + 'T12:00').getTime(), date,
+          amount: v.tips || 0, note: 'day total (old)', old: true, miles: v.miles || 0 });
       }
+      saveOrders();
     }
 
-    function today() {
-      return new Date().toISOString().split('T')[0];
+    function saveOrders() { localStorage.setItem(ORDERS_KEY, JSON.stringify(orders)); }
+
+    // Local-date string (the old code used UTC, which flips the date late at night)
+    function today(d = new Date()) {
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     }
+    function money(n) { return '$' + n.toFixed(2); }
+    function timeOf(ts) { return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+    // Escape notes before putting them into HTML
+    function esc(t) { return String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
-    document.getElementById('date').value = today();
-
-    function saveEntry() {
-      const date = document.getElementById('date').value;
-      const tips = parseFloat(document.getElementById('tips').value) || 0;
-      const miles = parseFloat(document.getElementById('miles').value) || 0;
-      if (!date) return alert('Enter a date');
-      if (tips < 0 || miles < 0) return alert('Values must be positive');
-
-      data[date] = { tips, miles };
-      localStorage.setItem(KEY, JSON.stringify(data));
-      document.getElementById('tips').value = '';
-      document.getElementById('miles').value = '';
+    // Save one order immediately with an automatic timestamp, then clear and refocus for the next one
+    function saveOrder() {
+      const amtEl = document.getElementById('amount'), noteEl = document.getElementById('note');
+      const amount = parseFloat(amtEl.value);
+      if (isNaN(amount) || amount < 0) { amtEl.focus(); return alert('Enter a tip of $0 or more'); }
+      const now = new Date();
+      orders.push({ id: String(now.getTime()) + Math.random().toString(36).slice(2, 6), ts: now.getTime(),
+        date: today(now), amount, note: noteEl.value.trim() });
+      saveOrders();
+      amtEl.value = ''; noteEl.value = '';
+      document.getElementById('savedMsg').textContent = '✓ Saved ' + money(amount) + ' at ' + timeOf(now.getTime());
       render();
+      amtEl.focus(); // keep the keyboard up for the next order
     }
 
-    function deleteEntry(date) {
-      if (confirm('Delete entry for ' + date + '?')) {
-        delete data[date];
-        localStorage.setItem(KEY, JSON.stringify(data));
-        render();
-      }
+    function editOrder(id) {
+      const o = orders.find(x => x.id === id); if (!o) return;
+      const a = prompt('Tip amount ($)', o.amount); if (a === null) return;
+      const n = parseFloat(a); if (isNaN(n) || n < 0) return alert('Enter a tip of $0 or more');
+      const note = prompt('Note (optional)', o.note || ''); if (note === null) return;
+      o.amount = n; o.note = note.trim(); saveOrders(); render();
+    }
+
+    function deleteOrder(id) {
+      const o = orders.find(x => x.id === id);
+      if (o && confirm('Delete ' + money(o.amount) + ' order?')) { orders = orders.filter(x => x.id !== id); saveOrders(); render(); }
+    }
+
+    function deleteDay(date) {
+      if (confirm('Delete all orders for ' + date + '?')) { orders = orders.filter(o => o.date !== date); saveOrders(); render(); }
     }
 
     function render() {
-      const entries = Object.entries(data).sort((a,b) => b[0].localeCompare(a[0]));
-      const days = entries.length;
-      const totalTips = entries.reduce((s, [,v]) => s + (v.tips || 0), 0);
-      const totalMiles = entries.reduce((s, [,v]) => s + (v.miles || 0), 0);
-      const avgTips = days ? totalTips / days : 0;
-      const avgMiles = days ? totalMiles / days : 0;
+      // Group orders by day for totals and history
+      const byDay = {};
+      for (const o of orders) (byDay[o.date] ||= []).push(o);
+      const days = Object.keys(byDay).sort().reverse();
+      const total = orders.reduce((s, o) => s + o.amount, 0);
+      const t = today(), todays = (byDay[t] || []).slice().sort((a, b) => b.ts - a.ts);
 
-      document.getElementById('totalTips').textContent = '$' + totalTips.toFixed(2);
-      document.getElementById('avgTips').textContent = '$' + avgTips.toFixed(2);
-      document.getElementById('totalMiles').textContent = totalMiles.toFixed(1);
-      document.getElementById('avgMiles').textContent = avgMiles.toFixed(1);
-      document.getElementById('days').textContent = days;
+      document.getElementById('todayTotal').textContent = money(todays.reduce((s, o) => s + o.amount, 0));
+      document.getElementById('todayCount').textContent = todays.filter(o => !o.old).length;
+      document.getElementById('totalTips').textContent = money(total);
+      document.getElementById('avgTips').textContent = money(days.length ? total / days.length : 0);
+      document.getElementById('days').textContent = days.length;
 
-      const list = document.getElementById('list');
-      if (!entries.length) {
-        list.innerHTML = '<div class="empty">No entries yet</div>';
-        return;
-      }
-      list.innerHTML = entries.map(([date, v]) => `
+      // Today's orders with edit/delete
+      document.getElementById('todayList').innerHTML = todays.length ? todays.map(o => `
         <div class="entry">
-          <div class="entry-info">${date}</div>
-          <div class="entry-vals">
-            $${(v.tips || 0).toFixed(2)}<br>
-            <span style="color:#aaa;font-size:0.85rem">${(v.miles || 0).toFixed(1)} mi</span>
-          </div>
-          <button class="delete" onclick="deleteEntry('${date}')">×</button>
-        </div>
-      `).join('');
+          <div class="entry-info">${timeOf(o.ts)}${o.note ? `<br><span style="color:#aaa;font-size:0.85rem">${esc(o.note)}</span>` : ''}</div>
+          <div class="entry-vals">${money(o.amount)}</div>
+          <button class="delete" style="background:#444" onclick="editOrder('${o.id}')">✎</button>
+          <button class="delete" onclick="deleteOrder('${o.id}')">×</button>
+        </div>`).join('') : '<div class="empty">No orders yet today</div>';
+
+      // History: one row per day with total and order count
+      const list = document.getElementById('list');
+      list.innerHTML = days.length ? days.map(d => {
+        const os = byDay[d], sum = os.reduce((s, o) => s + o.amount, 0);
+        const n = os.filter(o => !o.old).length, old = os.some(o => o.old);
+        const miles = os.reduce((s, o) => s + (o.miles || 0), 0); // legacy per-day miles, if any
+        const sub = [n ? n + ' order' + (n > 1 ? 's' : '') : '', old ? 'day total (old)' : '', miles ? miles.toFixed(1) + ' mi' : ''].filter(Boolean).join(' · ');
+        return `<div class="entry">
+          <div class="entry-info">${d}<br><span style="color:#aaa;font-size:0.85rem">${sub}</span></div>
+          <div class="entry-vals">${money(sum)}</div>
+          <button class="delete" onclick="deleteDay('${d}')">×</button>
+        </div>`;
+      }).join('') : '<div class="empty">No entries yet</div>';
     }
 
     render();
+
+    /* ---------- Gas range fill-up tracking ----------
+     * Stored separately under GAS_KEY:
+     *   { start: number|null,        // current starting range (miles to empty)
+     *     awaitingRefill: boolean,   // true after logging a fill-up, until new range is entered
+     *     fillups: [{ date, start, end, used, refill }] }
+     * The older per-day "miles" values (commit 7a5eeba) stay inside the tips data and
+     * still show in the tips history, so nothing old is lost. */
+    const GAS_KEY = 'doordash-gas';
+    let gas = JSON.parse(localStorage.getItem(GAS_KEY) || 'null') || { start: null, awaitingRefill: false, fillups: [] };
+    if (!Array.isArray(gas.fillups)) gas.fillups = []; // guard against partial/old shapes
+
+    function saveGas() { localStorage.setItem(GAS_KEY, JSON.stringify(gas)); }
+
+    // Read a whole non-negative number from an input, or null if blank/invalid
+    function readMiles(id) {
+      const v = parseFloat(document.getElementById(id).value);
+      return isNaN(v) || v < 0 ? null : v;
+    }
+
+    // Step 1: one-time starting range
+    function setStart() {
+      const v = readMiles('startInput');
+      if (v === null) return alert('Enter a starting range of 0 or more miles');
+      gas.start = v; gas.awaitingRefill = false;
+      saveGas(); document.getElementById('startInput').value = ''; renderGas();
+    }
+
+    // Live warning while typing the ending range
+    function checkEnd() {
+      const v = readMiles('endInput');
+      document.getElementById('endWarn').textContent =
+        v !== null && gas.start !== null && v > gas.start
+          ? '⚠️ Ending range is higher than the starting range (' + gas.start + ' mi).' : '';
+    }
+
+    // Step 2: ending range at the pump -> fill-up entry with miles used
+    function logFill() {
+      const end = readMiles('endInput');
+      if (end === null) return alert('Enter the ending range (0 or more miles)');
+      if (end > gas.start) {
+        // Would give negative miles used: warn and refuse
+        return alert('Ending range (' + end + ') is greater than starting range (' + gas.start + '). Miles used can\'t be negative — check the numbers or reset your starting range.');
+      }
+      const used = gas.start - end;
+      gas.fillups.push({ date: today(), start: gas.start, end, used, refill: null });
+      gas.awaitingRefill = true;
+      saveGas();
+      document.getElementById('endInput').value = ''; checkEnd(); renderGas();
+      document.getElementById('refillInput').focus();
+    }
+
+    // Step 3: range after filling becomes the next starting range
+    function setRefill() {
+      const v = readMiles('refillInput');
+      if (v === null) return alert('Enter the new range after filling up');
+      const last = gas.fillups[gas.fillups.length - 1];
+      if (last) last.refill = v;
+      gas.start = v; gas.awaitingRefill = false;
+      saveGas(); document.getElementById('refillInput').value = ''; renderGas();
+    }
+
+    function deleteFill(i) {
+      if (!confirm('Delete this fill-up?')) return;
+      gas.fillups.splice(i, 1); saveGas(); renderGas();
+    }
+
+    // Show only the step that applies right now, plus history and total
+    function renderGas() {
+      const step = gas.start === null ? 'stepStart' : gas.awaitingRefill ? 'stepRefill' : 'stepEnd';
+      ['stepStart', 'stepEnd', 'stepRefill'].forEach(id =>
+        document.getElementById(id).style.display = id === step ? '' : 'none');
+      document.getElementById('startRange').textContent = gas.start === null ? '—' : gas.start;
+      const total = gas.fillups.reduce((s, f) => s + (f.used || 0), 0);
+      document.getElementById('gasTotal').textContent = total.toFixed(0);
+      const last = gas.fillups[gas.fillups.length - 1];
+      if (last) document.getElementById('refillHint').textContent = 'Logged ' + last.used + ' mi used. Fill up, then enter the new range.';
+
+      const list = document.getElementById('fillList');
+      if (!gas.fillups.length) { list.innerHTML = '<div class="empty">No fill-ups yet</div>'; return; }
+      // Newest first, keeping the original index for delete
+      list.innerHTML = gas.fillups.map((f, i) => ({ f, i })).reverse().map(({ f, i }) => `
+        <div class="entry">
+          <div class="entry-info">${f.date}<br>
+            <span style="color:#aaa;font-size:0.85rem">${f.start} → ${f.end} mi${f.refill !== null ? ' · refilled to ' + f.refill : ''}</span>
+          </div>
+          <div class="entry-vals">${f.used} mi</div>
+          <button class="delete" onclick="deleteFill(${i})">×</button>
+        </div>`).join('') +
+        `<div class="entry"><div class="entry-info"><b>Total</b></div><div class="entry-vals">${total.toFixed(0)} mi</div></div>`;
+    }
+
+    renderGas();
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('sw.js');

@@ -1,4 +1,4 @@
-const CACHE = 'tips-v1';
+const CACHE = 'tips-v2';
 const FILES = ['/', '/index.html', '/manifest.json'];
 
 self.addEventListener('install', e => {
