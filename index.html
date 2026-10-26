@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a1a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>DoorDash Tips</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛵</text></svg>">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #111; color: #eee; min-height: 100vh; padding: 1rem; }
+    header { text-align: center; margin-bottom: 1.5rem; }
+    h1 { font-size: 1.8rem; color: #ff6b35; }
+    .card { background: #1e1e1e; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
+    label { display: block; margin-bottom: 0.5rem; color: #aaa; }
+    input, button { width: 100%; padding: 0.75rem; border: none; border-radius: 8px; font-size: 1rem; }
+    input { background: #2a2a2a; color: #fff; margin-bottom: 0.5rem; }
+    button { background: #ff6b35; color: #fff; font-weight: bold; cursor: pointer; }
+    button:active { opacity: 0.8; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; text-align: center; }
+    .stat { background: #2a2a2a; padding: 0.75rem; border-radius: 8px; }
+    .stat b { display: block; font-size: 1.2rem; color: #ff6b35; }
+    .entry { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #333; }
+    .entry:last-child { border: none; }
+    .delete { background: #c0392b; width: auto; padding: 0.4rem 0.8rem; font-size: 0.8rem; }
+    .empty { text-align: center; color: #666; padding: 2rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🛵 DoorDash Tips</h1>
+    <p>Track your daily tips</p>
+  </header>
+
+  <div class="card">
+    <label>Date</label>
+    <input type="date" id="date">
+    <label>Tips ($)</label>
+    <input type="number" id="amount" step="0.01" min="0" placeholder="0.00">
+    <button onclick="saveTip()">Save Tip</button>
+  </div>
+
+  <div class="card">
+    <div class="stats">
+      <div class="stat"><b id="total">$0</b>Total</div>
+      <div class="stat"><b id="avg">$0</b>Avg/Day</div>
+      <div class="stat"><b id="days">0</b>Days</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-bottom:0.5rem">History</h3>
+    <div id="list"></div>
+  </div>
+
+  <script>
+    const KEY = 'doordash-tips';
+    let tips = JSON.parse(localStorage.getItem(KEY) || '{}');
+
+    function today() {
+      return new Date().toISOString().split('T')[0];
+    }
+
+    document.getElementById('date').value = today();
+
+    function saveTip() {
+      const date = document.getElementById('date').value;
+      const amount = parseFloat(document.getElementById('amount').value);
+      if (!date || isNaN(amount) || amount < 0) return alert('Enter valid date and amount');
+      tips[date] = amount;
+      localStorage.setItem(KEY, JSON.stringify(tips));
+      document.getElementById('amount').value = '';
+      render();
+    }
+
+    function deleteTip(date) {
+      if (confirm('Delete tip for ' + date + '?')) {
+        delete tips[date];
+        localStorage.setItem(KEY, JSON.stringify(tips));
+        render();
+      }
+    }
+
+    function render() {
+      const entries = Object.entries(tips).sort((a,b) => b[0].localeCompare(a[0]));
+      const total = entries.reduce((s, [,v]) => s + v, 0);
+      const days = entries.length;
+      const avg = days ? total / days : 0;
+
+      document.getElementById('total').textContent = '$' + total.toFixed(2);
+      document.getElementById('avg').textContent = '$' + avg.toFixed(2);
+      document.getElementById('days').textContent = days;
+
+      const list = document.getElementById('list');
+      if (!entries.length) {
+        list.innerHTML = '<div class="empty">No tips logged yet</div>';
+        return;
+      }
+      list.innerHTML = entries.map(([date, amount]) => `
+        <div class="entry">
+          <span>${date}</span>
+          <span style="font-weight:bold;color:#ff6b35">$${amount.toFixed(2)}</span>
+          <button class="delete" onclick="deleteTip('${date}')">×</button>
+        </div>
+      `).join('');
+    }
+
+    render();
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js');
+    }
+  </script>
+</body>
+</html>
