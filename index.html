@@ -56,6 +56,11 @@
       <div class="stat"><b id="totalTips">$0.00</b>All-Time Tips</div>
       <div class="stat"><b id="avgTips">$0.00</b>Avg Per Day</div>
     </div>
+    <!-- Net earnings = tips minus gas spent (fill-up cost = gallons x price) -->
+    <div class="stats" style="margin-top:0.5rem">
+      <div class="stat"><b id="netToday">$0.00</b>Net Today</div>
+      <div class="stat"><b id="netAll">$0.00</b>Net All-Time</div>
+    </div>
     <div style="text-align:center;margin-top:0.5rem;color:#aaa"><b id="days">0</b> days tracked</div>
   </div>
 
@@ -75,7 +80,15 @@
     <div class="stats" style="margin-bottom:0.75rem">
       <div class="stat"><b id="startRange">—</b>Starting Range (mi)</div>
       <div class="stat"><b id="gasTotal">0</b>Total Miles Used</div>
+      <!-- Estimated gallons left = current range / average MPG, capped at tank size -->
+      <div class="stat"><b id="galLeft">—</b>Est. Gallons Left</div>
+      <div class="stat"><b id="avgMpg">—</b>Avg MPG</div>
+      <div class="stat"><b id="totGal">0.0</b>Total Gallons</div>
+      <div class="stat"><b id="totSpent">$0.00</b>Total Gas Spent</div>
+      <div class="stat"><b id="avgPrice">—</b>Avg $/Gallon</div>
+      <div class="stat"><b id="tankSize">13.2</b>Tank (gal) <a href="#" style="color:#ff6b35" onclick="editTank();return false">edit</a></div>
     </div>
+    <p class="hint" id="galNote"></p>
     <!-- Step 1: shown only until a starting range exists -->
     <div id="stepStart">
       <label>Starting range (miles to empty)</label>
@@ -87,6 +100,11 @@
       <label>Ending range (shown when you arrived, before filling)</label>
       <input type="number" id="endInput" step="1" min="0" placeholder="e.g. 40" oninput="checkEnd()">
       <div class="warn" id="endWarn"></div>
+      <!-- Gallons pumped and price per gallon for this fill-up -->
+      <label>Gallons pumped</label>
+      <input type="number" id="galInput" inputmode="decimal" step="0.001" min="0" placeholder="e.g. 11.4">
+      <label>Price per gallon ($)</label>
+      <input type="number" id="priceInput" inputmode="decimal" step="0.001" min="0" placeholder="e.g. 3.29">
       <button onclick="logFill()">Log Fill-Up</button>
     </div>
     <!-- Step 3: after filling, the new range becomes the next starting range -->
@@ -101,6 +119,12 @@
   <div class="card">
     <h3 style="margin-bottom:0.5rem">Fill-Ups</h3>
     <div id="fillList"></div>
+  </div>
+
+  <!-- Gas price history: only fill-ups that recorded a price -->
+  <div class="card">
+    <h3 style="margin-bottom:0.5rem">Gas Price History</h3>
+    <div id="priceList"></div>
   </div>
 
   <script>
@@ -183,6 +207,14 @@
       document.getElementById('avgTips').textContent = money(days.length ? total / days.length : 0);
       document.getElementById('days').textContent = days.length;
 
+      // Net earnings: tips minus gas cost. Gas cost is grouped by fill-up date.
+      // Old fill-ups without gallons/price have no cost and count as $0.
+      const gasByDay = {};
+      for (const f of gas.fillups) if (f.cost) gasByDay[f.date] = (gasByDay[f.date] || 0) + f.cost;
+      const gasAll = Object.values(gasByDay).reduce((s, c) => s + c, 0);
+      document.getElementById('netToday').textContent = money(todays.reduce((s, o) => s + o.amount, 0) - (gasByDay[t] || 0));
+      document.getElementById('netAll').textContent = money(total - gasAll);
+
       // Today's orders with edit/delete
       document.getElementById('todayList').innerHTML = todays.length ? todays.map(o => `
         <div class="entry">
@@ -198,7 +230,9 @@
         const os = byDay[d], sum = os.reduce((s, o) => s + o.amount, 0);
         const n = os.filter(o => !o.old).length, old = os.some(o => o.old);
         const miles = os.reduce((s, o) => s + (o.miles || 0), 0); // legacy per-day miles, if any
-        const sub = [n ? n + ' order' + (n > 1 ? 's' : '') : '', old ? 'day total (old)' : '', miles ? miles.toFixed(1) + ' mi' : ''].filter(Boolean).join(' · ');
+        const g = gasByDay[d] || 0; // gas bought that day, shown with net
+        const sub = [n ? n + ' order' + (n > 1 ? 's' : '') : '', old ? 'day total (old)' : '', miles ? miles.toFixed(1) + ' mi' : '',
+          g ? 'gas ' + money(g) + ' · net ' + money(sum - g) : ''].filter(Boolean).join(' · ');
         return `<div class="entry">
           <div class="entry-info">${d}<br><span style="color:#aaa;font-size:0.85rem">${sub}</span></div>
           <div class="entry-vals">${money(sum)}</div>
@@ -207,18 +241,29 @@
       }).join('') : '<div class="empty">No entries yet</div>';
     }
 
-    render();
+    // NOTE: first render() now happens after gas data loads (see bottom), since net earnings needs it.
 
     /* ---------- Gas range fill-up tracking ----------
      * Stored separately under GAS_KEY:
      *   { start: number|null,        // current starting range (miles to empty)
      *     awaitingRefill: boolean,   // true after logging a fill-up, until new range is entered
-     *     fillups: [{ date, start, end, used, refill }] }
+     *     tank: number,              // tank size in gallons (default 13.2, editable)
+     *     fillups: [{ date, start, end, used, refill, gallons?, price?, cost?, mpg? }] }
+     * gallons/price/cost/mpg only exist on fill-ups logged after this update; older ones
+     * are kept as-is and simply skipped by the MPG and price stats.
      * The older per-day "miles" values (commit 7a5eeba) stay inside the tips data and
      * still show in the tips history, so nothing old is lost. */
     const GAS_KEY = 'doordash-gas';
     let gas = JSON.parse(localStorage.getItem(GAS_KEY) || 'null') || { start: null, awaitingRefill: false, fillups: [] };
     if (!Array.isArray(gas.fillups)) gas.fillups = []; // guard against partial/old shapes
+    if (!(gas.tank > 0)) gas.tank = 13.2;               // default tank: 2012 Corolla S, 13.2 gal
+
+    // Let the user change the tank size
+    function editTank() {
+      const v = prompt('Tank size (gallons)', gas.tank); if (v === null) return;
+      const n = parseFloat(v); if (!(n > 0)) return alert('Enter a tank size above 0');
+      gas.tank = n; saveGas(); renderGas();
+    }
 
     function saveGas() { localStorage.setItem(GAS_KEY, JSON.stringify(gas)); }
 
@@ -252,8 +297,15 @@
         // Would give negative miles used: warn and refuse
         return alert('Ending range (' + end + ') is greater than starting range (' + gas.start + '). Miles used can\'t be negative — check the numbers or reset your starting range.');
       }
+      const gallons = readMiles('galInput'), price = readMiles('priceInput');
+      if (!(gallons > 0)) return alert('Enter the gallons you pumped');
+      if (price === null) return alert('Enter the price per gallon');
       const used = gas.start - end;
-      gas.fillups.push({ date: today(), start: gas.start, end, used, refill: null });
+      // Cost and MPG for this tank (miles driven since last fill / gallons to refill it)
+      const cost = Math.round(gallons * price * 100) / 100;
+      const mpg = used / gallons;
+      gas.fillups.push({ date: today(), start: gas.start, end, used, refill: null, gallons, price, cost, mpg });
+      document.getElementById('galInput').value = ''; document.getElementById('priceInput').value = '';
       gas.awaitingRefill = true;
       saveGas();
       document.getElementById('endInput').value = ''; checkEnd(); renderGas();
@@ -284,15 +336,47 @@
       const total = gas.fillups.reduce((s, f) => s + (f.used || 0), 0);
       document.getElementById('gasTotal').textContent = total.toFixed(0);
       const last = gas.fillups[gas.fillups.length - 1];
+
+      // Gallon/price stats: only fill-ups that recorded gallons (old ones are skipped)
+      const withGal = gas.fillups.filter(f => f.gallons > 0);
+      const totGal = withGal.reduce((s, f) => s + f.gallons, 0);
+      const totSpent = withGal.reduce((s, f) => s + (f.cost || 0), 0);
+      const mpgMiles = withGal.reduce((s, f) => s + f.used, 0);
+      const avgMpg = totGal ? mpgMiles / totGal : 0; // weighted average MPG
+      document.getElementById('tankSize').textContent = gas.tank;
+      document.getElementById('totGal').textContent = totGal.toFixed(1);
+      document.getElementById('totSpent').textContent = money(totSpent);
+      document.getElementById('avgPrice').textContent = totGal ? money(totSpent / totGal) : '—';
+      document.getElementById('avgMpg').textContent = avgMpg ? avgMpg.toFixed(1) : '—';
+      // Estimated gallons left from current range, never more than the tank holds
+      const note = document.getElementById('galNote');
+      if (avgMpg && gas.start !== null) {
+        const left = Math.min(gas.start / avgMpg, gas.tank);
+        document.getElementById('galLeft').textContent = left.toFixed(1) + ' / ' + gas.tank;
+        note.textContent = '';
+      } else {
+        document.getElementById('galLeft').textContent = '— / ' + gas.tank;
+        note.textContent = 'Gallons left shows after your first fill-up with gallons entered (needs MPG).';
+      }
+      // Price history list, newest first
+      const priced = gas.fillups.filter(f => f.price != null).slice().reverse();
+      document.getElementById('priceList').innerHTML = priced.length ? priced.map(f => `
+        <div class="entry"><div class="entry-info">${f.date}<br><span style="color:#aaa;font-size:0.85rem">${f.gallons} gal · ${money(f.cost)}</span></div>
+        <div class="entry-vals">${money(f.price)}/gal</div></div>`).join('') : '<div class="empty">No prices yet</div>';
+
+      render(); // gas changes affect net earnings in the tips cards
+
       if (last) document.getElementById('refillHint').textContent = 'Logged ' + last.used + ' mi used. Fill up, then enter the new range.';
 
       const list = document.getElementById('fillList');
       if (!gas.fillups.length) { list.innerHTML = '<div class="empty">No fill-ups yet</div>'; return; }
+      // Extra line for fill-ups with gallons; old ones show nothing extra
+      const galLine = f => f.gallons > 0 ? `<br><span style="color:#aaa;font-size:0.85rem">${f.gallons} gal @ ${money(f.price)} = ${money(f.cost)} · ${f.mpg.toFixed(1)} MPG</span>` : '';
       // Newest first, keeping the original index for delete
       list.innerHTML = gas.fillups.map((f, i) => ({ f, i })).reverse().map(({ f, i }) => `
         <div class="entry">
           <div class="entry-info">${f.date}<br>
-            <span style="color:#aaa;font-size:0.85rem">${f.start} → ${f.end} mi${f.refill !== null ? ' · refilled to ' + f.refill : ''}</span>
+            <span style="color:#aaa;font-size:0.85rem">${f.start} → ${f.end} mi${f.refill !== null ? ' · refilled to ' + f.refill : ''}</span>${galLine(f)}
           </div>
           <div class="entry-vals">${f.used} mi</div>
           <button class="delete" onclick="deleteFill(${i})">×</button>
