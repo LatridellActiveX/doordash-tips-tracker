@@ -121,6 +121,25 @@
     <div id="fillList"></div>
   </div>
 
+  <!-- Mileage tracker: log trips; each gets an estimated gas cost ("est. trip gas") -->
+  <div class="card">
+    <h3 style="margin-bottom:0.5rem">🚗 Mileage</h3>
+    <div class="stats" style="margin-bottom:0.75rem">
+      <div class="stat"><b id="miToday">0</b>Miles Today</div>
+      <div class="stat"><b id="miWeek">0</b>Miles This Week</div>
+      <div class="stat"><b id="miAll">0</b>Miles All-Time</div>
+      <div class="stat"><b id="tripGasAll">$0.00</b>Est. Trip Gas (all)</div>
+    </div>
+    <p class="hint" id="rateNote"></p>
+    <input type="number" id="tripMiles" inputmode="decimal" step="0.1" min="0" placeholder="Trip miles">
+    <input type="text" id="tripNote" placeholder="Note (optional)">
+    <button onclick="logTrip()">Log Trip</button>
+    <!-- One-tap preset: Cape Cod Mall round trip, 23 mi each way -->
+    <button style="margin-top:0.5rem;background:#2d6cdf" onclick="logTrip(46, 'Cape Cod Mall (round trip)')">🛍️ Cape Cod Mall (46 mi round trip)</button>
+    <div class="hint" id="tripMsg" style="margin:0.5rem 0 0;text-align:center"></div>
+    <div id="tripList" style="margin-top:0.5rem"></div>
+  </div>
+
   <!-- Gas price history: only fill-ups that recorded a price -->
   <div class="card">
     <h3 style="margin-bottom:0.5rem">Gas Price History</h3>
@@ -212,8 +231,13 @@
       const gasByDay = {};
       for (const f of gas.fillups) if (f.cost) gasByDay[f.date] = (gasByDay[f.date] || 0) + f.cost;
       const gasAll = Object.values(gasByDay).reduce((s, c) => s + c, 0);
-      document.getElementById('netToday').textContent = money(todays.reduce((s, o) => s + o.amount, 0) - (gasByDay[t] || 0));
-      document.getElementById('netAll').textContent = money(total - gasAll);
+      // Also subtract estimated trip gas (from the Mileage card), grouped by trip date.
+      // This is an estimate, separate from real fill-up costs; labeled "est. trip gas".
+      const tripByDay = {};
+      for (const tr of trips) tripByDay[tr.date] = (tripByDay[tr.date] || 0) + tr.est;
+      const tripAll = Object.values(tripByDay).reduce((s, c) => s + c, 0);
+      document.getElementById('netToday').textContent = money(todays.reduce((s, o) => s + o.amount, 0) - (gasByDay[t] || 0) - (tripByDay[t] || 0));
+      document.getElementById('netAll').textContent = money(total - gasAll - tripAll);
 
       // Today's orders with edit/delete
       document.getElementById('todayList').innerHTML = todays.length ? todays.map(o => `
@@ -230,9 +254,11 @@
         const os = byDay[d], sum = os.reduce((s, o) => s + o.amount, 0);
         const n = os.filter(o => !o.old).length, old = os.some(o => o.old);
         const miles = os.reduce((s, o) => s + (o.miles || 0), 0); // legacy per-day miles, if any
-        const g = gasByDay[d] || 0; // gas bought that day, shown with net
+        const g = gasByDay[d] || 0;   // real gas bought that day
+        const tg = tripByDay[d] || 0; // estimated trip gas that day
         const sub = [n ? n + ' order' + (n > 1 ? 's' : '') : '', old ? 'day total (old)' : '', miles ? miles.toFixed(1) + ' mi' : '',
-          g ? 'gas ' + money(g) + ' · net ' + money(sum - g) : ''].filter(Boolean).join(' · ');
+          g ? 'gas ' + money(g) : '', tg ? 'est. trip gas ' + money(tg) : '',
+          (g || tg) ? 'net ' + money(sum - g - tg) : ''].filter(Boolean).join(' · ');
         return `<div class="entry">
           <div class="entry-info">${d}<br><span style="color:#aaa;font-size:0.85rem">${sub}</span></div>
           <div class="entry-vals">${money(sum)}</div>
@@ -365,6 +391,7 @@
         <div class="entry-vals">${money(f.price)}/gal</div></div>`).join('') : '<div class="empty">No prices yet</div>';
 
       render(); // gas changes affect net earnings in the tips cards
+      if (tripsLoaded) renderTrips(); // refresh trip rate note (var is hoisted, false until trips load)
 
       if (last) document.getElementById('refillHint').textContent = 'Logged ' + last.used + ' mi used. Fill up, then enter the new range.';
 
@@ -384,7 +411,70 @@
         `<div class="entry"><div class="entry-info"><b>Total</b></div><div class="entry-vals">${total.toFixed(0)} mi</div></div>`;
     }
 
-    renderGas();
+    /* ---------- Mileage trips ----------
+     * Stored under TRIPS_KEY: [{ id, ts, date, miles, note, est, mpg, price }]
+     * est = miles / MPG x gas price, frozen at log time (so later fill-ups don't rewrite old trips).
+     * Rates: MPG = average MPG from fill-ups (fallback 30); price = average $/gal from
+     * fill-ups (fallback $4.30). */
+    const TRIPS_KEY = 'doordash-trips';
+    let trips = JSON.parse(localStorage.getItem(TRIPS_KEY) || '[]');
+    if (!Array.isArray(trips)) trips = [];
+    var tripsLoaded = true; // lets renderGas() know trips can be rendered
+    function saveTrips() { localStorage.setItem(TRIPS_KEY, JSON.stringify(trips)); }
+
+    // Current rates for estimates, with fallbacks when there's no fill-up data yet
+    function rates() {
+      const withGal = gas.fillups.filter(f => f.gallons > 0);
+      const gal = withGal.reduce((s, f) => s + f.gallons, 0);
+      const mi = withGal.reduce((s, f) => s + f.used, 0);
+      const spent = withGal.reduce((s, f) => s + (f.cost || 0), 0);
+      return { mpg: gal && mi ? mi / gal : 30, price: gal ? spent / gal : 4.30, mpgFallback: !(gal && mi), priceFallback: !gal };
+    }
+
+    // Log a trip; called with no args from the form, or with preset miles/note (Cape Cod Mall)
+    function logTrip(presetMiles, presetNote) {
+      const mEl = document.getElementById('tripMiles'), nEl = document.getElementById('tripNote');
+      const miles = presetMiles ?? parseFloat(mEl.value);
+      if (!(miles > 0)) { mEl.focus(); return alert('Enter trip miles above 0'); }
+      const { mpg, price } = rates();
+      const est = Math.round(miles / mpg * price * 100) / 100;
+      const now = new Date();
+      trips.push({ id: String(now.getTime()) + Math.random().toString(36).slice(2, 6), ts: now.getTime(), date: today(now),
+        miles, note: presetNote ?? nEl.value.trim(), est, mpg, price });
+      saveTrips();
+      if (presetMiles === undefined) { mEl.value = ''; nEl.value = ''; }
+      document.getElementById('tripMsg').textContent = '✓ ' + miles + ' mi · est. trip gas ' + money(est) +
+        ' (' + mpg.toFixed(1) + ' MPG @ ' + money(price) + '/gal)';
+      renderTrips(); render();
+    }
+
+    function deleteTrip(id) {
+      const tr = trips.find(x => x.id === id);
+      if (tr && confirm('Delete ' + tr.miles + ' mi trip?')) { trips = trips.filter(x => x.id !== id); saveTrips(); renderTrips(); render(); }
+    }
+
+    function renderTrips() {
+      const t = today();
+      // Week starts Monday (local)
+      const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+      const sum = a => a.reduce((s, x) => s + x.miles, 0);
+      document.getElementById('miToday').textContent = sum(trips.filter(x => x.date === t)).toFixed(1);
+      document.getElementById('miWeek').textContent = sum(trips.filter(x => x.ts >= d.getTime())).toFixed(1);
+      document.getElementById('miAll').textContent = sum(trips).toFixed(1);
+      document.getElementById('tripGasAll').textContent = money(trips.reduce((s, x) => s + x.est, 0));
+      const r = rates();
+      document.getElementById('rateNote').textContent = 'Estimates use ' + r.mpg.toFixed(1) + ' MPG' + (r.mpgFallback ? ' (default, no MPG data yet)' : '') +
+        ' @ ' + money(r.price) + '/gal' + (r.priceFallback ? ' (default, no priced fill-ups yet)' : '') + '.';
+      document.getElementById('tripList').innerHTML = trips.length ? trips.slice().sort((a, b) => b.ts - a.ts).map(x => `
+        <div class="entry">
+          <div class="entry-info">${x.date} ${timeOf(x.ts)}${x.note ? `<br><span style="color:#aaa;font-size:0.85rem">${esc(x.note)}</span>` : ''}</div>
+          <div class="entry-vals">${x.miles} mi<br><span style="color:#aaa;font-size:0.8rem">est. trip gas ${money(x.est)}</span></div>
+          <button class="delete" onclick="deleteTrip('${x.id}')">×</button>
+        </div>`).join('') : '<div class="empty">No trips yet</div>';
+    }
+
+    renderGas();   // also calls render() for the tips cards
+    renderTrips();
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('sw.js');
