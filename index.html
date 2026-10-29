@@ -127,6 +127,13 @@
       <div class="stat"><b id="ciLeft">—</b>Est. Gallons Left</div>
     </div>
     <p class="hint" id="ciNote"></p>
+    <!-- Day starting range: today by default, or pick any past date -->
+    <label>Day starting range <span id="dsToday" style="color:#ff6b35"></span></label>
+    <div style="display:flex;gap:0.5rem">
+      <input type="date" id="dsDate" style="flex:1">
+      <input type="number" id="dsInput" inputmode="decimal" step="1" min="0" placeholder="Range (mi)" style="flex:1">
+    </div>
+    <button style="margin-bottom:0.75rem;background:#444" onclick="setDayStartForm()">Save Day Start</button>
     <input type="number" id="ciInput" inputmode="decimal" step="1" min="0" placeholder="Current range (mi)" oninput="checkCi()">
     <div class="warn" id="ciWarn"></div>
     <button onclick="checkIn()">Check In</button>
@@ -233,7 +240,8 @@
       // Group orders by day for totals and history
       const byDay = {};
       for (const o of orders) (byDay[o.date] ||= []).push(o);
-      const days = Object.keys(byDay).sort().reverse();
+      // Include days that only have a starting range set (no tips yet) in history too
+      const days = [...new Set([...Object.keys(byDay), ...Object.keys(gas.dayStarts)])].sort().reverse();
       const total = orders.reduce((s, o) => s + o.amount, 0);
       const t = today(), todays = (byDay[t] || []).slice().sort((a, b) => b.ts - a.ts);
 
@@ -268,7 +276,7 @@
       // History: one row per day with total and order count
       const list = document.getElementById('list');
       list.innerHTML = days.length ? days.map(d => {
-        const os = byDay[d], sum = os.reduce((s, o) => s + o.amount, 0);
+        const os = byDay[d] || [], sum = os.reduce((s, o) => s + o.amount, 0);
         const n = os.filter(o => !o.old).length, old = os.some(o => o.old);
         const miles = os.reduce((s, o) => s + (o.miles || 0), 0); // legacy per-day miles, if any
         const g = gasByDay[d] || 0;   // real gas bought that day
@@ -276,9 +284,13 @@
         const sub = [n ? n + ' order' + (n > 1 ? 's' : '') : '', old ? 'day total (old)' : '', miles ? miles.toFixed(1) + ' mi' : '',
           g ? 'gas ' + money(g) : '', tg ? 'est. trip gas ' + money(tg) + ' (estimate, not in net)' : '',
           g ? 'net ' + money(sum - g) : ''].filter(Boolean).join(' · ');
+        // Day starting range + miles driven that day (see dayMiles below)
+        const ds = gas.dayStarts[d], dm = dayMiles(d);
+        const dayLine = ds != null ? `<br><span style="color:#aaa;font-size:0.85rem">start ${ds} mi · driven ${dm === null ? '—' : dm + ' mi'}</span>` : '';
         return `<div class="entry">
-          <div class="entry-info">${d}<br><span style="color:#aaa;font-size:0.85rem">${sub}</span></div>
+          <div class="entry-info">${d}<br><span style="color:#aaa;font-size:0.85rem">${sub}</span>${dayLine}</div>
           <div class="entry-vals">${money(sum)}</div>
+          <button class="delete" style="background:#444" title="Set starting range" onclick="editDayStart('${d}')">⛽✎</button>
           <button class="delete" onclick="deleteDay('${d}')">×</button>
         </div>`;
       }).join('') : '<div class="empty">No entries yet</div>';
@@ -303,6 +315,46 @@
     /* Check-ins: gas.checkins = [{ id, ts, date, range, tank }]. "tank" is gas.tankNo at the
      * time, so each fill-up starts a fresh group while old groups stay in history. */
     if (!Array.isArray(gas.checkins)) gas.checkins = [];
+    /* Per-day starting range: gas.dayStarts = { 'YYYY-MM-DD': range }. Set for today in the
+     * Check-Ins card, or for any day (date picker / ✎ in History by Day). */
+    if (!gas.dayStarts || typeof gas.dayStarts !== 'object') gas.dayStarts = {};
+
+    /* Miles driven on a day: walk that day's events in time order from the day's starting
+     * range. Check-in: add prev - range. Fill-up: add prev - ending range, then continue from
+     * the refill range. Old fill-ups have no time, so they're treated as noon. Returns null
+     * if no starting range was set for the day. */
+    function dayMiles(d) {
+      const start = gas.dayStarts[d]; if (start == null) return null;
+      const ev = [
+        ...gas.checkins.filter(c => c.date === d).map(c => ({ ts: c.ts, r: c.range })),
+        ...gas.fillups.filter(f => f.date === d).map(f => ({ ts: f.ts || new Date(d + 'T12:00').getTime(), r: f.end, refill: f.refill }))
+      ].sort((a, b) => a.ts - b.ts);
+      let prev = start, miles = 0;
+      for (const e of ev) {
+        if (e.r <= prev) miles += prev - e.r; // ignore impossible increases
+        prev = e.refill != null ? e.refill : e.r;
+      }
+      return miles;
+    }
+
+    function saveDayStart(d, v) {
+      if (v === null) delete gas.dayStarts[d]; else gas.dayStarts[d] = v;
+      saveGas(); render(); renderCheckins();
+    }
+    // Prompt-based edit for any day (blank = remove)
+    function editDayStart(d) {
+      const cur = gas.dayStarts[d];
+      const a = prompt('Starting range for ' + d + ' (miles, blank to clear)', cur ?? ''); if (a === null) return;
+      if (a.trim() === '') return saveDayStart(d, null);
+      const n = parseFloat(a); if (isNaN(n) || n < 0) return alert('Enter 0 or more miles');
+      saveDayStart(d, n);
+    }
+    // Form in the Check-Ins card: date picker (defaults to today) + range
+    function setDayStartForm() {
+      const d = document.getElementById('dsDate').value || today();
+      const v = readMiles('dsInput'); if (v === null) return alert('Enter the starting range');
+      document.getElementById('dsInput').value = ''; saveDayStart(d, v);
+    }
     if (!(gas.tankNo >= 0)) gas.tankNo = 0;
     const tankCis = () => gas.checkins.filter(c => c.tank === gas.tankNo);
     // Latest known range: last check-in this tank, else the tank's starting range
@@ -355,7 +407,7 @@
       // Cost and MPG for this tank (miles driven since last fill / gallons to refill it)
       const cost = Math.round(gallons * price * 100) / 100;
       const mpg = used / gallons;
-      gas.fillups.push({ date: today(), start: gas.start, end, used, refill: null, gallons, price, cost, mpg });
+      gas.fillups.push({ ts: Date.now(), date: today(), start: gas.start, end, used, refill: null, gallons, price, cost, mpg });
       document.getElementById('galInput').value = ''; document.getElementById('priceInput').value = '';
       gas.awaitingRefill = true;
       saveGas();
@@ -480,6 +532,11 @@
             <button class="delete" onclick="deleteCheckin('${c.id}')">×</button></div>`);
         }
       }
+      // Today's day-start status + default the date picker to today
+      const td = today(), dEl = document.getElementById('dsDate');
+      if (!dEl.value) dEl.value = td;
+      document.getElementById('dsToday').textContent = gas.dayStarts[td] != null
+        ? '(today: ' + gas.dayStarts[td] + ' mi, driven ' + dayMiles(td) + ' mi)' : '(not set for today)';
       document.getElementById('ciList').innerHTML = rows.length ? rows.join('') : '<div class="empty">No check-ins yet</div>';
       // Since-last-fill-up summary (current tank)
       const miles = gas.start === null ? 0 : gas.start - currentRange();
